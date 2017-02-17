@@ -1,3 +1,5 @@
+import os
+import sys
 import requests
 from requests import Session
 from requests.exceptions import HTTPError
@@ -14,7 +16,9 @@ from collections import OrderedDict
 from sseclient import SSEClient
 import threading
 import socket
-from oauth2client.service_account import ServiceAccountCredentials
+import oauth2client.service_account as oauth_service_account
+import oauth2client.contrib.appengine as oauth_appengine
+
 from gcloud import storage
 from requests.packages.urllib3.contrib.appengine import is_appengine_sandbox
 from requests_toolbelt.adapters import appengine
@@ -22,6 +26,13 @@ from requests_toolbelt.adapters import appengine
 import python_jwt as jwt
 from Crypto.PublicKey import RSA
 import datetime
+
+
+SCOPES = [
+    'https://www.googleapis.com/auth/firebase.database',
+    'https://www.googleapis.com/auth/userinfo.email',
+    "https://www.googleapis.com/auth/cloud-platform"
+]
 
 
 def initialize_app(config):
@@ -35,19 +46,8 @@ class Firebase:
         self.auth_domain = config["authDomain"]
         self.database_url = config["databaseURL"]
         self.storage_bucket = config["storageBucket"]
-        self.credentials = None
+        self.credentials = self._set_credentials(config.get("service_account"))
         self.requests = requests.Session()
-        if config.get("serviceAccount"):
-            scopes = [
-                'https://www.googleapis.com/auth/firebase.database',
-                'https://www.googleapis.com/auth/userinfo.email',
-                "https://www.googleapis.com/auth/cloud-platform"
-            ]
-            service_account_type = type(config["serviceAccount"])
-            if service_account_type is str:
-                self.credentials = ServiceAccountCredentials.from_json_keyfile_name(config["serviceAccount"], scopes)
-            if service_account_type is dict:
-                self.credentials = ServiceAccountCredentials.from_json_keyfile_dict(config["serviceAccount"], scopes)
         if is_appengine_sandbox():
             # Fix error in standard GAE environment
             # is releated to https://github.com/kennethreitz/requests/issues/3187
@@ -58,6 +58,49 @@ class Firebase:
 
         for scheme in ('http://', 'https://'):
             self.requests.mount(scheme, adapter)
+
+    def _set_credentials(self, service_account=None):
+        if service_account:
+            service_account_type = type(service_account)
+            if  not (
+                service_account_type is dict or service_account_type is str
+            ):
+                raise TypeError("This should be of either str or dict type.")
+
+            if service_account_type is str:
+                service_account = json.loads(service_account)
+
+        if sys.version_info < (3, 4):
+            return self._set_credentials_appengine_2(service_account)
+
+        return self._set_credentials_service_account(service_account)
+
+    def _set_credentials_service_account(self, service_account):
+        return oauth_service_account.ServiceAccountCredentials.from_json_keyfile_dict(
+            service_account, SCOPES
+        )
+
+        return None
+
+    def _set_credentials_appengine_2(self, service_account):
+        credentials = oauth_appengine.AppAssertionCredentials(
+            'https://www.googleapis.com/auth/firebase.database'
+        )
+        sa_email = os.environ.get("SERVICE_ACCOUNT_EMAIL", None)
+        sa_private_key = os.environ.get("SERVICE_ACCOUNT_PRIVATE_KEY", None)
+
+        if (
+            service_account
+            and "client_email" in service_account
+            and "private_key" in service_account
+        ):
+            sa_email = service_account["client_email"]
+            sa_private_key = service_account["private_key"]
+
+        credentials._service_account_email = sa_email
+        credentials._private_key_pkcs8_pem = sa_private_key
+
+        return credentials
 
     def auth(self):
         return Auth(self.api_key, self.requests, self.credentials)
